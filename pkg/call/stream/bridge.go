@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 	"github.com/purpshell/meowcaller"
@@ -34,6 +35,11 @@ type bridge struct {
 	sendVideo      func([]byte) error
 	startVideo     func() error
 	startVideoOnce sync.Once
+	inboundReady   atomic.Bool
+}
+
+func (b *bridge) allowInbound() {
+	b.inboundReady.Store(true)
 }
 
 func newBridge(conn *websocket.Conn) *bridge {
@@ -64,12 +70,18 @@ func (b *bridge) writeStart(callID string, video bool) {
 
 // WriteFrame implements meowcaller.AudioSink: one decoded mono frame from the peer.
 func (b *bridge) WriteFrame(frame []float32) error {
+	if !b.inboundReady.Load() {
+		return nil
+	}
 	payload := base64.StdEncoding.EncodeToString(pcm16FromFloat32(frame))
 	return b.writeJSON(wsMessage{Event: "media", Track: "inbound", Payload: payload})
 }
 
 // WriteVideo implements meowcaller.VideoSink: one Annex-B H.264 access unit.
 func (b *bridge) WriteVideo(accessUnit []byte) error {
+	if !b.inboundReady.Load() {
+		return nil
+	}
 	payload := base64.StdEncoding.EncodeToString(accessUnit)
 	return b.writeJSON(wsMessage{Event: "video", Track: "inbound", Payload: payload})
 }
@@ -106,6 +118,10 @@ func (b *bridge) readLoop() {
 	for {
 		var msg wsMessage
 		if err := b.conn.ReadJSON(&msg); err != nil {
+			b.Close()
+			return
+		}
+		if msg.Event == "stop" {
 			b.Close()
 			return
 		}

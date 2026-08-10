@@ -25,6 +25,17 @@
   <a href="mailto:suporte@evofoundation.com.br">Support</a>
 </p>
 
+## Rekovi call-stream build provenance
+
+The Rekovi call-control build is based on upstream pull request
+[`evolution-foundation/evolution-go#141`](https://github.com/evolution-foundation/evolution-go/pull/141),
+pinned to commit `51ca5e1588b1def67ca78d945e85f8642198f8fe` (26 commits) so later updates or
+force-pushes to the open PR cannot silently change a production build.
+
+`POST /call/dial` is experimental code outside the reviewed answer-call design. Rekovi
+uses audio calls only; `POST /call/participant/add` and mid-call audio-to-video upgrades
+have known upstream limitations and must not be used in production.
+
 
 ---
 

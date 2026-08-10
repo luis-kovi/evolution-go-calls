@@ -20,6 +20,7 @@ type CallService interface {
 	AnswerCall(data *AnswerCallStruct, instance *instance_model.Instance) (*meowcaller.Call, error)
 	HangupCall(data *HangupCallStruct, instance *instance_model.Instance) error
 	GetActiveCall(instanceId, callId string) (*meowcaller.Call, error)
+	IsOutgoingCall(instanceId, callId string) bool
 	DialCall(data *DialCallStruct, instance *instance_model.Instance) (*meowcaller.Call, error)
 	ReactCall(data *ReactCallStruct, instance *instance_model.Instance) error
 	AddParticipant(data *AddParticipantStruct, instance *instance_model.Instance) error
@@ -107,12 +108,11 @@ func (c *callService) RejectCall(data *RejectCallStruct, instance *instance_mode
 		return errors.New("no pending call with that id")
 	}
 
-	err := call.Reject()
-	c.callRegistry.Delete(data.CallID)
-	if err != nil {
+	if err := call.Reject(); err != nil {
 		logger.LogError("[%s] error reject call: %v", instance.Id, err)
 		return err
 	}
+	c.callRegistry.Delete(data.CallID)
 
 	return nil
 }
@@ -142,12 +142,11 @@ func (c *callService) HangupCall(data *HangupCallStruct, instance *instance_mode
 		return errors.New("no active call with that id")
 	}
 
-	err := call.Hangup()
-	c.callRegistry.Delete(data.CallID)
-	if err != nil {
+	if err := call.Hangup(); err != nil {
 		logger.LogError("[%s] error hanging up call: %v", instance.Id, err)
 		return err
 	}
+	c.callRegistry.Delete(data.CallID)
 	return nil
 }
 
@@ -157,6 +156,10 @@ func (c *callService) GetActiveCall(instanceId, callId string) (*meowcaller.Call
 		return nil, errors.New("no active call with that id")
 	}
 	return call, nil
+}
+
+func (c *callService) IsOutgoingCall(instanceId, callId string) bool {
+	return c.callRegistry.IsOutgoing(instanceId, callId)
 }
 
 // DialCall places an outbound call and registers it so /call/stream and
@@ -173,7 +176,7 @@ func (c *callService) DialCall(data *DialCallStruct, instance *instance_model.In
 		return nil, err
 	}
 
-	c.callRegistry.Store(instance.Id, call)
+	c.callRegistry.StoreOutgoing(instance.Id, call)
 
 	return call, nil
 }

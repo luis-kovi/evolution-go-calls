@@ -44,6 +44,29 @@ func TestDeleteRemovesEntry(t *testing.T) {
 	}
 }
 
+func TestOutgoingMetadataIsScopedByInstance(t *testing.T) {
+	r := NewCallRegistry()
+	call := &meowcaller.Call{}
+	r.StoreOutgoing("instance-a", call)
+
+	if !r.IsOutgoing("instance-a", callIDOf(call)) {
+		t.Fatal("expected outgoing call metadata")
+	}
+	if r.IsOutgoing("instance-b", callIDOf(call)) {
+		t.Fatal("expected outgoing metadata lookup from a different instance to fail")
+	}
+}
+
+func TestStoreDefaultsToIncoming(t *testing.T) {
+	r := NewCallRegistry()
+	call := &meowcaller.Call{}
+	r.Store("instance-a", call)
+
+	if r.IsOutgoing("instance-a", callIDOf(call)) {
+		t.Fatal("expected Store to record an incoming call")
+	}
+}
+
 // callIDOf mirrors what CallRegistry.Store keys entries by: meowcaller.Call.ID().
 // A zero-value *meowcaller.Call has an empty string ID, which is a perfectly valid
 // (if degenerate) key for exercising Store/Get/Delete without a live call.
