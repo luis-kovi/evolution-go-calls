@@ -1154,6 +1154,12 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	case *events.Message:
 		doWebhook = true
 		postMap["event"] = "Message"
+		editCtx, editCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		editError := normalizeSecretEdit(editCtx, mycli.WAClient, evt)
+		editCancel()
+		if editError != nil {
+			mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Encrypted edit unavailable for message %s", mycli.userID, evt.Info.ID)
+		}
 		// Message received
 
 		// Log message arrival with detailed info
@@ -1847,6 +1853,10 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	case *events.HistorySync:
 		doWebhook = true
 		postMap["event"] = "HistorySync"
+		historyCtx, historyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		recoveredEdits, unavailableEdits := normalizeHistorySecretEdits(historyCtx, mycli.WAClient, evt)
+		historyCancel()
+		mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] History edits: recovered=%d unavailable=%d", mycli.userID, recoveredEdits, unavailableEdits)
 
 		mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] History sync event received %+v", mycli.userID, evt.Data.SyncType)
 	case *events.AppState:
