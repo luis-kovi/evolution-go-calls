@@ -209,6 +209,7 @@ type Button struct {
 //   - mixing `reply` with CTA buttons (copy/url/call) makes the message invisible on WhatsApp Web;
 //   - safe combinations: only-reply (up to 3) OR grouped CTAs (copy + url + call).
 type ButtonStruct struct {
+	Id string `json:"id,omitempty"`
 	// Destination phone number.
 	Number string `json:"number" example:"5582988898565"`
 	// Header title (required).
@@ -1856,23 +1857,11 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 	var msgType string
 
 	if hasReply && !hasOtherTypes && !hasPix {
-		// Reply-only: native ButtonsMessage wrapped in DocumentWithCaptionMessage (Baileys PR #36).
-		var replyButtons []*waE2E.ButtonsMessage_Button
-		for _, v := range data.Buttons {
-			replyButtons = append(replyButtons, &waE2E.ButtonsMessage_Button{
-				ButtonID: proto.String(v.Id),
-				ButtonText: &waE2E.ButtonsMessage_Button_ButtonText{
-					DisplayText: proto.String(v.DisplayText),
-				},
-				Type: waE2E.ButtonsMessage_Button_RESPONSE.Enum(),
-			})
-		}
-
-		buttonsMsg := &waE2E.ButtonsMessage{
-			ContentText: proto.String(data.Description),
-			FooterText:  proto.String(data.Footer),
-			HeaderType:  waE2E.ButtonsMessage_EMPTY.Enum(),
-			Buttons:     replyButtons,
+		// WhatsApp rejects legacy ButtonsMessage with 405. Reply buttons use
+		// the same native-flow format and biz node as interactive CTAs.
+		header := &waE2E.InteractiveMessage_Header{
+			Title:              proto.String(data.Title),
+			HasMediaAttachment: proto.Bool(false),
 		}
 
 		// Optional media header (image or video URL).
@@ -1882,8 +1871,8 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 				resp.Body.Close()
 				if readErr == nil {
 					if uploaded, upErr := client.Upload(context.Background(), fileData, whatsmeow.MediaImage); upErr == nil {
-						buttonsMsg.HeaderType = waE2E.ButtonsMessage_IMAGE.Enum()
-						buttonsMsg.Header = &waE2E.ButtonsMessage_ImageMessage{
+						header.HasMediaAttachment = proto.Bool(true)
+						header.Media = &waE2E.InteractiveMessage_Header_ImageMessage{
 							ImageMessage: &waE2E.ImageMessage{
 								URL:           proto.String(uploaded.URL),
 								DirectPath:    proto.String(uploaded.DirectPath),
@@ -1903,8 +1892,8 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 				resp.Body.Close()
 				if readErr == nil {
 					if uploaded, upErr := client.Upload(context.Background(), fileData, whatsmeow.MediaVideo); upErr == nil {
-						buttonsMsg.HeaderType = waE2E.ButtonsMessage_VIDEO.Enum()
-						buttonsMsg.Header = &waE2E.ButtonsMessage_VideoMessage{
+						header.HasMediaAttachment = proto.Bool(true)
+						header.Media = &waE2E.InteractiveMessage_Header_VideoMessage{
 							VideoMessage: &waE2E.VideoMessage{
 								URL:           proto.String(uploaded.URL),
 								DirectPath:    proto.String(uploaded.DirectPath),
@@ -1920,17 +1909,8 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 			}
 		}
 
-		msg = &waE2E.Message{
-			DocumentWithCaptionMessage: &waE2E.FutureProofMessage{
-				Message: &waE2E.Message{
-					ButtonsMessage: buttonsMsg,
-				},
-			},
-			MessageContextInfo: &waE2E.MessageContextInfo{
-				MessageSecret: btnMsgSecret,
-			},
-		}
-		msgType = "ButtonsMessage"
+		msg = replyButtonMessage(data, header, buttons, btnMsgSecret, messageParamsJSON)
+		msgType = "InteractiveMessage"
 	} else if hasPix {
 		// Pix: NativeFlowMessage wrapped in DocumentWithCaptionMessage.
 		paymentMsgParams := `{"native_flow_name":"order_details","version":1}`
@@ -2063,6 +2043,7 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 	// Route through centralized SendMessage for ContextInfo, webhooks, quotes, mentions.
 	message, err := s.SendMessage(instance, msg, msgType, &SendDataStruct{
 		Number:          data.Number,
+		Id:              data.Id,
 		Delay:           data.Delay,
 		MentionAll:      data.MentionAll,
 		MentionedJID:    data.MentionedJID,
@@ -2076,6 +2057,36 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 	}
 
 	return message, nil
+}
+
+// replyButtonMessage keeps the button wire format independently testable.
+func replyButtonMessage(data *ButtonStruct, header *waE2E.InteractiveMessage_Header,
+	buttons []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton,
+	secret []byte, params string) *waE2E.Message {
+	return &waE2E.Message{
+		DocumentWithCaptionMessage: &waE2E.FutureProofMessage{
+			Message: &waE2E.Message{
+				InteractiveMessage: &waE2E.InteractiveMessage{
+					Header:      header,
+					Body:        &waE2E.InteractiveMessage_Body{Text: proto.String(data.Description)},
+					Footer:      &waE2E.InteractiveMessage_Footer{Text: proto.String(data.Footer)},
+					ContextInfo: &waE2E.ContextInfo{},
+					InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+						NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+							Buttons:           buttons,
+							MessageParamsJSON: proto.String(params),
+							MessageVersion:    proto.Int32(1),
+						},
+					},
+				},
+			},
+		},
+		MessageContextInfo: &waE2E.MessageContextInfo{
+			MessageSecret:             secret,
+			DeviceListMetadata:        &waE2E.DeviceListMetadata{},
+			DeviceListMetadataVersion: proto.Int32(2),
+		},
+	}
 }
 
 func stringPointer(s string) *string {
