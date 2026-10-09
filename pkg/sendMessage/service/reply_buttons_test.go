@@ -26,8 +26,8 @@ func TestReplyButtonsUseNativeFlow(t *testing.T) {
 	if err := proto.Unmarshal(wire, decoded); err != nil {
 		t.Fatal(err)
 	}
-	inner := decoded.GetDocumentWithCaptionMessage().GetMessage()
-	if inner == nil || inner.GetButtonsMessage() != nil {
+	inner := decoded
+	if inner == nil || inner.GetButtonsMessage() != nil || inner.GetDocumentWithCaptionMessage() != nil {
 		t.Fatal("legacy or missing interactive envelope")
 	}
 	interactive := inner.GetInteractiveMessage()

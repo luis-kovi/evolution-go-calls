@@ -1979,8 +1979,8 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 	}
 
 	// Build biz/bot nodes injected directly in the XMPP stanza — required for mobile rendering.
-	// Reply-only buttons get <biz><buttons/></biz>; CTA/Pix get <biz><interactive type="native_flow" v="1"><native_flow name="X"/></interactive></biz>.
-	// The <bot biz_bot="1"/> node is required for 1:1 chats (skipped on groups).
+	// Reply-only buttons use the generic native_flow v=9 name=mixed stanza.
+	// Preserve existing bot metadata only for CTA/Pix messages.
 	var bizInteractiveContent waBinary.Node
 	if hasReply && !hasOtherTypes && !hasPix {
 		bizInteractiveContent = waBinary.Node{
@@ -1992,7 +1992,8 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 			Content: []waBinary.Node{{
 				Tag: "native_flow",
 				Attrs: waBinary.Attrs{
-					"name": "quick_reply",
+					"name": "mixed",
+					"v":    "9",
 				},
 			}},
 		}
@@ -2033,7 +2034,7 @@ func (s *sendService) SendButton(data *ButtonStruct, instance *instance_model.In
 			Content: []waBinary.Node{bizInteractiveContent},
 		},
 	}
-	if !strings.Contains(data.Number, "@g.us") {
+	if !hasReply && !strings.Contains(data.Number, "@g.us") {
 		bizNodes = append(bizNodes, waBinary.Node{
 			Tag:   "bot",
 			Attrs: waBinary.Attrs{"biz_bot": "1"},
@@ -2064,20 +2065,16 @@ func replyButtonMessage(data *ButtonStruct, header *waE2E.InteractiveMessage_Hea
 	buttons []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton,
 	secret []byte, params string) *waE2E.Message {
 	return &waE2E.Message{
-		DocumentWithCaptionMessage: &waE2E.FutureProofMessage{
-			Message: &waE2E.Message{
-				InteractiveMessage: &waE2E.InteractiveMessage{
-					Header:      header,
-					Body:        &waE2E.InteractiveMessage_Body{Text: proto.String(data.Description)},
-					Footer:      &waE2E.InteractiveMessage_Footer{Text: proto.String(data.Footer)},
-					ContextInfo: &waE2E.ContextInfo{},
-					InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
-						NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
-							Buttons:           buttons,
-							MessageParamsJSON: proto.String(params),
-							MessageVersion:    proto.Int32(1),
-						},
-					},
+		InteractiveMessage: &waE2E.InteractiveMessage{
+			Header:      header,
+			Body:        &waE2E.InteractiveMessage_Body{Text: proto.String(data.Description)},
+			Footer:      &waE2E.InteractiveMessage_Footer{Text: proto.String(data.Footer)},
+			ContextInfo: &waE2E.ContextInfo{},
+			InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+				NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+					Buttons:           buttons,
+					MessageParamsJSON: proto.String(params),
+					MessageVersion:    proto.Int32(1),
 				},
 			},
 		},
