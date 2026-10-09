@@ -2,6 +2,7 @@ package whatsmeow_service
 
 import (
 	"context"
+	"fmt"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -22,10 +23,17 @@ func normalizeSecretEdit(ctx context.Context, client *whatsmeow.Client, event *e
 	if err != nil {
 		return err
 	}
-	kind := waE2E.ProtocolMessage_MESSAGE_EDIT
-	event.Message = &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
-		Type: &kind, Key: secret.GetTargetMessageKey(), EditedMessage: decrypted,
-	}}
+	if protocol := decrypted.GetProtocolMessage(); protocol != nil {
+		if protocol.GetType() != waE2E.ProtocolMessage_MESSAGE_EDIT || protocol.GetKey().GetID() != secret.GetTargetMessageKey().GetID() {
+			return fmt.Errorf("encrypted edit target mismatch")
+		}
+		event.Message = decrypted
+	} else {
+		kind := waE2E.ProtocolMessage_MESSAGE_EDIT
+		event.Message = &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
+			Type: &kind, Key: secret.GetTargetMessageKey(), EditedMessage: decrypted,
+		}}
+	}
 	// The protocol contains the original target ID; this event's ID belongs to
 	// the edit operation and must not be interpreted as the message being edited.
 	event.IsEdit = false
