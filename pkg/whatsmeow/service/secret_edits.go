@@ -21,6 +21,22 @@ func normalizeSecretEdit(ctx context.Context, client *whatsmeow.Client, event *e
 	}
 	decrypted, err := client.DecryptSecretEncryptedMessage(ctx, event)
 	if err != nil {
+		// History may identify the modifier by PN while the authenticated edit
+		// uses its LID (or vice versa). Try only a verified mapping in the store.
+		var alternate types.JID
+		var aliasErr error
+		if event.Info.Sender.Server == types.DefaultUserServer {
+			alternate, aliasErr = client.Store.LIDs.GetLIDForPN(ctx, event.Info.Sender.ToNonAD())
+		} else if event.Info.Sender.Server == types.HiddenUserServer {
+			alternate, aliasErr = client.Store.LIDs.GetPNForLID(ctx, event.Info.Sender.ToNonAD())
+		}
+		if aliasErr == nil && !alternate.IsEmpty() && alternate != event.Info.Sender {
+			candidate := *event
+			candidate.Info.Sender = alternate
+			decrypted, err = client.DecryptSecretEncryptedMessage(ctx, &candidate)
+		}
+	}
+	if err != nil {
 		return err
 	}
 	if protocol := decrypted.GetProtocolMessage(); protocol != nil {
