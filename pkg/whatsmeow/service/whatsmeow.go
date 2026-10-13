@@ -86,6 +86,8 @@ type clientVersion struct {
 type whatsmeowService struct {
 	instanceRepository instance_repository.InstanceRepository
 	authDB             *sql.DB
+	sessionStore       *sharedSessionStore
+	clientRunLocks     *sync.Map
 	messageRepository  message_repository.MessageRepository
 	labelRepository    label_repository.LabelRepository
 	pollService        poll_service.PollService // NOVO: Serviço de enquetes
@@ -109,6 +111,8 @@ type whatsmeowService struct {
 }
 
 type MyClient struct {
+	stopChannel        chan bool
+	doneChannel        chan struct{}
 	service            WhatsmeowService
 	WAClient           *whatsmeow.Client
 	eventHandlerID     uint32
@@ -311,6 +315,13 @@ func (w whatsmeowService) ForceUpdateJid(instanceId string, number string) error
 }
 
 func (w whatsmeowService) StartClient(cd *ClientData) {
+	// One client generation at a time per instance. Capture its stop channel;
+	// an old QR timer must never stop a replacement generation.
+	stopChannel := w.killChannel[cd.Instance.Id]
+	lockValue, _ := w.clientRunLocks.LoadOrStore(cd.Instance.Id, &sync.Mutex{})
+	runLock := lockValue.(*sync.Mutex)
+	runLock.Lock()
+	defer runLock.Unlock()
 
 	w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("Starting websocket connection to Whatsapp for user '%s'", cd.Instance.Id)
 
@@ -324,21 +335,13 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 	}
 
 	var container *sqlstore.Container
-
-	if w.config.WaDebug != "" {
-		dbLog := waLog.Stdout("Database", w.config.WaDebug, true)
-		if w.config.PostgresAuthDB != "" {
-			container, err = sqlstore.New(context.Background(), "postgres", w.config.PostgresAuthDB, dbLog)
-		} else {
-			dsn := fmt.Sprintf("file:%s/dbdata/main.db?_pragma=foreign_keys(1)&_busy_timeout=5000&cache=shared&mode=rwc&_journal_mode=WAL", w.exPath)
-			container, err = sqlstore.New(context.Background(), "sqlite", dsn, dbLog)
-		}
+	if w.config.PostgresAuthDB != "" {
+		container, err = w.sessionStore.get(context.Background())
 	} else {
-		if w.config.PostgresAuthDB != "" {
-			container, err = sqlstore.New(context.Background(), "postgres", w.config.PostgresAuthDB, nil)
-		} else {
-			dsn := fmt.Sprintf("file:%s/dbdata/main.db?_pragma=foreign_keys(1)&_busy_timeout=5000&cache=shared&mode=rwc&_journal_mode=WAL", w.exPath)
-			container, err = sqlstore.New(context.Background(), "sqlite", dsn, nil)
+		dsn := fmt.Sprintf("file:%s/dbdata/main.db?_pragma=foreign_keys(1)&_busy_timeout=5000&cache=shared&mode=rwc&_journal_mode=WAL", w.exPath)
+		container, err = sqlstore.New(context.Background(), "sqlite", dsn, nil)
+		if err == nil {
+			defer container.Close()
 		}
 	}
 
@@ -480,10 +483,14 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 		}
 	}
 
-	client.EnableAutoReconnect = false
+	// Native reconnect reuses the authenticated client/store and applies backoff.
+	// Recreating clients in Disconnected leaked pools and orphaned generations.
+	client.EnableAutoReconnect = true
 	client.AutoTrustIdentity = true
 
 	mycli := &MyClient{
+		stopChannel:        stopChannel,
+		doneChannel:        make(chan struct{}),
 		service:            &w,
 		Instance:           cd.Instance,
 		WAClient:           client,
@@ -516,6 +523,7 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 		passkeyCeremony:    w.passkeyCeremony,
 	}
 
+	defer close(mycli.doneChannel)
 	mycli.eventHandlerID = mycli.WAClient.AddEventHandler(mycli.myEventHandler)
 
 	// Armazena o MyClient no map para permitir atualizações posteriores
@@ -589,68 +597,21 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 
 	}
 
-	// Removed auto-reconnect logic to prevent infinite loops
-
-	for {
-		select {
-		case <-w.killChannel[cd.Instance.Id]:
-			w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("Received kill signal for user '%s'", cd.Instance.Id)
-			client.Disconnect()
-
-			delete(w.clientPointer, cd.Instance.Id)
-			delete(w.myClientPointer, cd.Instance.Id)
-
-			// Limpar cache de userInfo para esta instância
-			w.userInfoCache.Delete(cd.Instance.Token)
-			w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] UserInfo cache cleared for token: %s", cd.Instance.Id, cd.Instance.Token)
-
-			cd.Instance.Connected = false
-
-			err := w.instanceRepository.UpdateConnected(cd.Instance.Id, cd.Instance.Connected, cd.Instance.DisconnectReason)
-			if err != nil {
-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Error updating instance: %s", cd.Instance.Id, err)
-			}
-
-			postMap := make(map[string]interface{})
-
-			postMap["event"] = "LoggedOut"
-
-			dataMap := make(map[string]interface{})
-
-			dataMap["reason"] = "Logged out"
-
-			postMap["data"] = dataMap
-
-			postMap["instanceToken"] = mycli.token
-			postMap["instanceId"] = mycli.userID
-			postMap["instanceName"] = cd.Instance.Name
-
-			var queueName string
-
-			if _, ok := postMap["event"]; ok {
-				queueName = strings.ToLower(fmt.Sprintf("%s.%s", cd.Instance.Id, postMap["event"]))
-			}
-
-			values, err := json.Marshal(postMap)
-			if err != nil {
-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to marshal JSON for queue", cd.Instance.Id)
-				return
-			}
-
-			go w.CallWebhook(cd.Instance, queueName, values)
-
-			if mycli.config.AmqpGlobalEnabled || mycli.config.NatsGlobalEnabled {
-				go mycli.service.SendToGlobalQueues(postMap["event"].(string), values, mycli.userID)
-			}
-
-			// restart client
-			w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Restarting client", cd.Instance.Id)
-			w.StartClient(cd)
-			return
-		default:
-			time.Sleep(1000 * time.Millisecond)
+	// Stop is terminal for this generation (manual disconnect/logout or QR timeout).
+	// Only events.LoggedOut may publish a logout; local cleanup is not a logout.
+	<-stopChannel
+	client.RemoveEventHandler(mycli.eventHandlerID)
+	client.Disconnect()
+	if w.clientPointer[cd.Instance.Id] == client {
+		delete(w.clientPointer, cd.Instance.Id)
+		delete(w.myClientPointer, cd.Instance.Id)
+		delete(w.meowcallerPointer, cd.Instance.Id)
+		w.userInfoCache.Delete(cd.Instance.Token)
+		if err := w.instanceRepository.UpdateConnected(cd.Instance.Id, false, cd.Instance.DisconnectReason); err != nil {
+			w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Error updating stopped instance: %s", cd.Instance.Id, err)
 		}
 	}
+
 }
 
 func schedulePresenceUpdates(mycli *MyClient) {
@@ -723,6 +684,11 @@ func (mycli *MyClient) handleQRCodes(codes []string) {
 	go func() {
 		instanceID := mycli.userID
 		for i, code := range codes {
+			select {
+			case <-mycli.doneChannel:
+				return
+			default:
+			}
 			// A successful pair (Store.ID set) or an in-flight passkey ceremony
 			// supersedes QR — stop rotating WITHOUT tearing down. Store.ID stays
 			// nil throughout a passkey ceremony (it is only set at PairSuccess),
@@ -744,21 +710,17 @@ func (mycli *MyClient) handleQRCodes(codes []string) {
 				mycli.loggerWrapper.GetLogger(instanceID).LogInfo("[%s] QR code generated #%d (limit disabled)", instanceID, mycli.qrcodeCount)
 			}
 
-			// Max-count reached: force logout + teardown + QRTimeout (0 = disabled).
+			// Max-count reached: local teardown + QRTimeout (0 = disabled).
 			// But never tear down while a passkey ceremony is in flight.
 			if mycli.config.QrcodeMaxCount > 0 && mycli.qrcodeCount >= mycli.config.QrcodeMaxCount {
 				if mycli.passkeyCeremony != nil && mycli.passkeyCeremony.HasActiveByInstance(instanceID) {
 					mycli.loggerWrapper.GetLogger(instanceID).LogInfo("[%s] QR max-count reached but passkey ceremony active — not tearing down", instanceID)
 					return
 				}
-				mycli.loggerWrapper.GetLogger(instanceID).LogWarn("[%s] Maximum QR code count reached (%d), forcing logout and QRTimeout", instanceID, mycli.config.QrcodeMaxCount)
+				mycli.loggerWrapper.GetLogger(instanceID).LogWarn("[%s] Maximum QR code count reached (%d), emitting QRTimeout", instanceID, mycli.config.QrcodeMaxCount)
 
-				if mycli.WAClient.IsConnected() {
-					if err := mycli.WAClient.Logout(context.Background()); err != nil {
-						mycli.loggerWrapper.GetLogger(instanceID).LogWarn("[%s] Error during forced logout: %v", instanceID, err)
-					}
-				}
-				mycli.teardownQR(fmt.Sprintf("Maximum QR code count (%d) reached", mycli.config.QrcodeMaxCount), true)
+				// A QR timeout is local cancellation, never device revocation.
+				mycli.teardownQR(fmt.Sprintf("Maximum QR code count (%d) reached", mycli.config.QrcodeMaxCount), false)
 				return
 			}
 
@@ -801,7 +763,11 @@ func (mycli *MyClient) handleQRCodes(codes []string) {
 			if i == 0 {
 				timeout = 60 * time.Second
 			}
-			time.Sleep(timeout)
+			select {
+			case <-mycli.doneChannel:
+				return
+			case <-time.After(timeout):
+			}
 		}
 
 		// Ran out of codes without a PairSuccess. Treat as QR timeout (mirrors
@@ -818,15 +784,14 @@ func (mycli *MyClient) handleQRCodes(codes []string) {
 }
 
 // teardownQR clears the QR state and emits a QRTimeout event, then signals the
-// kill channel so StartClient's select loop performs the actual disconnect and
+// generation-specific stop channel so StartClient performs the actual disconnect and
 // map cleanup. IMPORTANT: this method must NOT delete from the shared
 // clientPointer/myClientPointer/killChannel maps itself — those are unsynchronized
 // service-wide maps and this runs in the handleQRCodes goroutine; doing the
 // delete()s here (concurrent with other instances' goroutines and the whatsmeow
-// dispatch) risks a `fatal error: concurrent map writes`. The kill-channel send
-// is blocking (like the original GetQRChannel timeout branch) so the signal is
-// never dropped and the socket can't be orphaned. Cleanup happens in the
-// StartClient goroutine, the single writer of those maps for this instance.
+// dispatch) risks a `fatal error: concurrent map writes`. The buffered stop
+// signal is scoped to this generation and does not block the event handler.
+// Cleanup happens in the StartClient goroutine.
 // If reason is non-empty it is included in the QRTimeout payload (max-count path).
 func (mycli *MyClient) teardownQR(reason string, forceLogout bool) {
 	instanceID := mycli.userID
@@ -863,13 +828,9 @@ func (mycli *MyClient) teardownQR(reason string, forceLogout bool) {
 		}
 	}
 
-	// Signal StartClient's select loop to disconnect and clean up the shared
-	// maps (it is the single writer for this instance). Blocking send mirrors
-	// the original timeout branch so the signal is never dropped.
+	// Cancel only this generation, including while Connect is in progress.
 	mycli.loggerWrapper.GetLogger(instanceID).LogWarn("[%s] QR timeout — signaling kill channel", instanceID)
-	if killChan, exists := mycli.killChannel[instanceID]; exists {
-		killChan <- true
-	}
+	signalClientStop(mycli.stopChannel)
 }
 
 func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
@@ -1926,7 +1887,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		}
 
 		// Agora mata o canal DEPOIS de enviar o evento
-		mycli.killChannel[mycli.userID] <- true
+		signalClientStop(mycli.stopChannel)
 	case *events.ChatPresence:
 		doWebhook = true
 		postMap["event"] = "ChatPresence"
@@ -2011,13 +1972,9 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] Error updating instance: %s", mycli.Instance.Id, err)
 		}
 
-		// Trigger instance restart via websocket-capable service (non-blocking)
-		go func(instanceID string) {
-			mycli.loggerWrapper.GetLogger(instanceID).LogInfo("[%s] Disconnected detected, restarting instance", instanceID)
-			if err := mycli.service.ReconnectClient(instanceID); err != nil {
-				mycli.loggerWrapper.GetLogger(instanceID).LogError("[%s] Failed to restart instance: %v", instanceID, err)
-			}
-		}(mycli.userID)
+		// whatsmeow handles authenticated socket loss on this same client. Do
+		// not turn transient disconnection into a fresh QR session or logout.
+
 	case *events.LabelEdit:
 		doWebhook = true
 		postMap["event"] = "LabelEdit"
@@ -2412,7 +2369,7 @@ func (w whatsmeowService) StartInstance(instanceId string) error {
 		}
 	}
 
-	w.killChannel[instance.Id] = make(chan bool)
+	w.killChannel[instance.Id] = make(chan bool, 1)
 
 	clientData := &ClientData{
 		Instance:      instance,
@@ -2844,6 +2801,8 @@ func NewWhatsmeowService(
 	return &whatsmeowService{
 		instanceRepository: instanceRepository,
 		authDB:             authDB,
+		sessionStore:       newSharedSessionStore(authDB),
+		clientRunLocks:     &sync.Map{},
 		messageRepository:  messageRepository,
 		labelRepository:    labelRepository,
 		pollService:        pollSvc, // NOVO: Serviço de enquetes
