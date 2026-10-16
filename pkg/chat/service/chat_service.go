@@ -222,25 +222,13 @@ func (c *chatService) HistorySyncRequest(data *HistorySyncRequestStruct, instanc
 		return nil, err
 	}
 
-	messageInfo := types.MessageInfo{
-		MessageSource: types.MessageSource{
-			Chat:     data.MessageInfo.Chat,
-			IsFromMe: data.MessageInfo.IsFromMe,
-			IsGroup:  data.MessageInfo.IsGroup,
-		},
-		ID:        data.MessageInfo.ID,
-		Timestamp: data.MessageInfo.Timestamp,
-	}
-
-	histRequest := client.BuildHistorySyncRequest(&messageInfo, data.Count)
-
-	res, err := client.SendMessage(context.Background(), messageInfo.Chat, histRequest, whatsmeow.SendRequestExtra{Peer: true})
+	res, err := sendHistorySyncRequest(context.Background(), client, data)
 	if err != nil {
 		c.loggerWrapper.GetLogger(instance.Id).LogError("[%s] error history sync request: %v", instance.Id, err)
 		return nil, err
 	}
 
-	return &res, nil
+	return res, nil
 }
 
 func NewChatService(

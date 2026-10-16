@@ -15,7 +15,8 @@ RUN go mod download
 COPY . .
 
 ARG VERSION=dev
-RUN CGO_ENABLED=1 go build -ldflags "-X main.version=${VERSION}" -o server ./cmd/evolution-go
+RUN CGO_ENABLED=1 go test ./pkg/chat/service ./pkg/whatsmeow/service ./pkg/sendMessage/service ./pkg/call/... -count=1 \
+    && CGO_ENABLED=1 go build -ldflags "-X main.version=${VERSION}" -o server ./cmd/evolution-go
 
 FROM alpine:3.19.1 AS final
 
