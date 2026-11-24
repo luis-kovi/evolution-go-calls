@@ -242,8 +242,8 @@ func (w whatsmeowService) ReconnectClient(instanceId string) error {
 	}
 
 	instance.Connected = false
-	instance.DisconnectReason = "Reconnecting"
-	err = w.instanceRepository.UpdateConnected(instanceId, false, "Reconnecting")
+	instance.DisconnectReason = disconnectReasonReconnecting
+	err = w.instanceRepository.UpdateConnected(instanceId, false, disconnectReasonReconnecting)
 	if err != nil {
 		w.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] Failed to update disconnect status: %v", instanceId, err)
 	}
@@ -598,6 +598,8 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 		delete(w.myClientPointer, cd.Instance.Id)
 		delete(w.meowcallerPointer, cd.Instance.Id)
 		w.userInfoCache.Delete(cd.Instance.Token)
+		// A requested stop must not look like an automatic drop to startup.
+		cd.Instance.DisconnectReason = stoppedReason(cd.Instance)
 		if err := w.instanceRepository.UpdateConnected(cd.Instance.Id, false, cd.Instance.DisconnectReason); err != nil {
 			w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Error updating stopped instance: %s", cd.Instance.Id, err)
 		}
@@ -1958,7 +1960,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] WhatsApp rejected client version %s as outdated (405)", mycli.userID, rejected.String())
 
 		mycli.userInfoCache.Delete(mycli.Instance.Token)
-		mycli.Instance.DisconnectReason = "405: client outdated (" + rejected.String() + ")"
+		mycli.Instance.DisconnectReason = disconnectReasonOutdatedPrefix + " (" + rejected.String() + ")"
 		mycli.Instance.Connected = false
 		if err := mycli.instanceRepository.UpdateConnected(mycli.Instance.Id, mycli.Instance.Connected, mycli.Instance.DisconnectReason); err != nil {
 			mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] Error updating instance: %s", mycli.Instance.Id, err)
@@ -1972,7 +1974,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		mycli.userInfoCache.Delete(mycli.Instance.Token)
 		mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] UserInfo cache cleared for token: %s", mycli.userID, mycli.Instance.Token)
 
-		mycli.Instance.DisconnectReason = "Disconnected emitted because the websocket is closed by the server."
+		mycli.Instance.DisconnectReason = disconnectReasonSocketClosed
 		mycli.Instance.Connected = false
 		err := mycli.instanceRepository.UpdateConnected(mycli.Instance.Id, mycli.Instance.Connected, mycli.Instance.DisconnectReason)
 		if err != nil {
@@ -2404,32 +2406,37 @@ func (w whatsmeowService) StartInstance(instanceId string) error {
 }
 
 func (w whatsmeowService) ConnectOnStartup(clientName string) {
-	w.loggerWrapper.GetLogger(clientName).LogInfo("Connecting all instances on startup")
-	var instances []*instance_model.Instance
-	var err error
+	logger := w.loggerWrapper.GetLogger(clientName)
+	logger.LogInfo("Connecting all instances on startup")
 
-	if clientName != "" {
-		instances, err = w.instanceRepository.GetAllConnectedInstancesByClientName(clientName)
-		if err != nil {
-			w.loggerWrapper.GetLogger(clientName).LogError("[%s] Error getting all connected instances: %s", clientName, err)
-			return
-		}
-	} else {
-		instances, err = w.instanceRepository.GetAllConnectedInstances()
-		if err != nil {
-			w.loggerWrapper.GetLogger(clientName).LogError("[%s] Error getting all connected instances: %s", clientName, err)
-			return
-		}
+	candidates, err := w.instanceRepository.GetStartupCandidates(clientName)
+	if err != nil {
+		logger.LogError("[%s] Error getting startup instances: %s", clientName, err)
+		return
 	}
 
-	w.loggerWrapper.GetLogger(clientName).LogInfo("[%s] Found %d connected instances", clientName, len(instances))
+	instances := selectStartupInstances(
+		candidates,
+		func(jid string) (bool, error) { return w.hasStoredSession(context.Background(), jid) },
+		func(instance *instance_model.Instance, reason string) {
+			logger.LogWarn("[%s] Not resuming instance '%s' (last disconnect: %q): %s", clientName, instance.Id, instance.DisconnectReason, reason)
+		},
+	)
+
+	resumed := 0
+	for _, instance := range instances {
+		if !instance.Connected {
+			resumed++
+		}
+	}
+	logger.LogInfo("[%s] Found %d instances to start (%d connected, %d resumed after an automatic disconnect)", clientName, len(instances), len(instances)-resumed, resumed)
 
 	for _, instance := range instances {
-		w.loggerWrapper.GetLogger(clientName).LogInfo("[%s] Starting client for user '%s'", clientName, instance.Id)
+		logger.LogInfo("[%s] Starting client for user '%s'", clientName, instance.Id)
 
 		err := w.StartInstance(instance.Id)
 		if err != nil {
-			w.loggerWrapper.GetLogger(clientName).LogError("[%s] Error starting client: %s", clientName, err)
+			logger.LogError("[%s] Error starting client: %s", clientName, err)
 		}
 	}
 }

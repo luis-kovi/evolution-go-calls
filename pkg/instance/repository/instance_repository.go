@@ -29,6 +29,7 @@ type InstanceRepository interface {
 	GetAllConnectedInstances() ([]*instance_model.Instance, error)
 	GetAllConnectedInstancesByClientName(clientName string) ([]*instance_model.Instance, error)
 	GetAll(clientName string) ([]*instance_model.Instance, error)
+	GetStartupCandidates(clientName string) ([]*instance_model.Instance, error)
 	Delete(instanceId string) error
 	GetAdvancedSettings(instanceId string) (*instance_model.AdvancedSettings, error)
 	UpdateAdvancedSettings(instanceId string, settings *instance_model.AdvancedSettings) error
@@ -133,6 +134,20 @@ func (i *instanceRepository) GetAllConnectedInstancesByClientName(clientName str
 		return nil, err
 	}
 
+	return instances, nil
+}
+
+// GetStartupCandidates returns instances marked connected or holding a paired
+// JID; the service decides which of them to resume.
+func (i *instanceRepository) GetStartupCandidates(clientName string) ([]*instance_model.Instance, error) {
+	var instances []*instance_model.Instance
+	query := i.db.Where("connected = ? OR jid <> ''", true)
+	if clientName != "" {
+		query = i.db.Where("client_name = ?", clientName).Where(query)
+	}
+	if err := query.Find(&instances).Error; err != nil {
+		return nil, err
+	}
 	return instances, nil
 }
 
