@@ -1795,13 +1795,9 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	case *events.Archive:
 		doWebhook = true
 		postMap["event"] = "Archive"
-
-		dataMap := postMap["data"].(map[string]interface{})
-		dataMap["JID"] = evt.JID
-		dataMap["Timestamp"] = evt.Timestamp
-		dataMap["Action"] = evt.Action
-		dataMap["FromFullSync"] = evt.FromFullSync
-		postMap["data"] = dataMap
+		// postMap["data"] starts as the raw *events.Archive; asserting it to a
+		// map panicked on every archived or unarchived chat.
+		postMap["data"] = archiveWebhookData(evt)
 
 		mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Chat archived", mycli.userID)
 	case *events.HistorySync:
